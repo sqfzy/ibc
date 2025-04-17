@@ -1,0 +1,8 @@
+[workspace]
+members = [
+  "ibc_aaka_scheme",
+  "aaka_rc_app",
+  "aaka_ms_server", "aaka_user_app",
+  "aaka_user_app",
+]
+resolver = "2"
