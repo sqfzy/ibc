@@ -13,7 +13,7 @@ cargo run --bin aaka_ms_server # 默认在3002端口
 
 ---
 
-**1. MEC Server (MS) API**
+## **1. MEC Server (MS) API**
 
 MS 提供核心的用户认证接口。
 
@@ -49,6 +49,7 @@ MS 提供核心的用户认证接口。
 
 **调用流程 (前端/用户模拟器):**
 
+**用户必须先计算且编码好`m_hex`, `sigma_hex`, `n`**
 1.  向 MS 的 `POST /auth/initiate` 发送该 JSON。
 2.  **如果成功 (200 OK):**
     *   解析返回的 `AuthSuccessResponse` JSON。
@@ -61,7 +62,7 @@ MS 提供核心的用户认证接口。
 
 ---
 
-**2. Registration Center (RC) API**
+## **2. Registration Center (RC) API**
 
 RC 提供系统初始化和实体注册的管理接口。这些接口通常不直接暴露给普通用户。
 
