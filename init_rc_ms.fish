@@ -42,6 +42,7 @@ end
 # Use curl to interact with RC API
 set RC_URL (echo "http://localhost:3001") # Read from .env or default
 
+echo ""
 echo "Running RC Setup via API ($RC_URL)..."
 curl -s -X POST $RC_URL/setup > /dev/null # Discard output, just need it to run
 if test $status -ne 0; echo "RC Setup failed!"; pkill -P $RC_PID; exit 1; end
@@ -56,6 +57,9 @@ set PARAMS_P_PUB_HEX (echo $PARAMS_JSON | jq -r .p_pub_hex)
 set PARAMS_P_PUB_HAT_HEX (echo $PARAMS_JSON | jq -r .p_pub_hat_hex)
 set PARAMS_G_HEX (echo $PARAMS_JSON | jq -r .g_hex)
 echo "Params P(G1) hex: $PARAMS_P_HEX" # Verify extraction
+echo "Params Ppub(G1) hex: $PARAMS_P_PUB_HEX" # Verify extraction
+echo "Params Ppub_hat(G1) hex: $PARAMS_P_PUB_HAT_HEX" # Verify extraction
+echo "Params G(G2) hex: $PARAMS_G_HEX" # Verify extraction
 
 echo "Registering user '$USER_ID' with RC..."
 set USER_REG_JSON (curl -s -X POST -H "Content-Type: application/json" -d "{\"id\": \"$USER_ID\"}" $RC_URL/register/user)
@@ -63,6 +67,7 @@ if test $status -ne 0; echo "Failed to register user!"; pkill -P $RC_PID; exit 1
 set USK_R_U_HEX (echo $USER_REG_JSON | jq -r .r_u_hex)
 set USK_SID_U_HEX (echo $USER_REG_JSON | jq -r .sid_u_hex)
 echo "User Ru(G1) hex: $USK_R_U_HEX" # Verify extraction
+echo "User SIDu(G2) hex: $USK_SID_U_HEX" # Verify extraction
 
 echo "Registering server '$SERVER_ID' with RC..."
 set SERVER_REG_JSON (curl -s -X POST -H "Content-Type: application/json" -d "{\"id\": \"$SERVER_ID\"}" $RC_URL/register/server)
@@ -70,15 +75,8 @@ if test $status -ne 0; echo "Failed to register server!"; pkill -P $RC_PID; exit
 set SSK_SID_MS_HEX (echo $SERVER_REG_JSON | jq -r .sid_ms_hex)
 echo "Server SIDms(G2) hex: $SSK_SID_MS_HEX" # Verify extraction
 
-# --- Step 3: Setup .env for MS (or pass via env vars) ---
-# Option A: Create/Update .env (ensure MS reads this specific .env)
-# Make sure the .env file used by MS app contains these values
-# This script assumes MS app reads the same .env or gets vars passed
-echo "Updating .env file for MS (or ensure MS reads these env vars)..."
-# (This part might need adjustment based on how MS loads config.
-#  Simplest might be to pass directly as environment variables in step 4)
-
 # --- Step 4: Start MS Server ---
+echo ""
 echo "Starting MS Server in background..."
 # Pass necessary config as environment variables
 set -x MS_SERVER_ID $SERVER_ID

@@ -198,7 +198,6 @@ async fn main() -> anyhow::Result<()> {
         p_pub_hat: hex_to_ark(&params_resp.p_pub_hat_hex)?,
         g: hex_to_ark(&params_resp.g_hex)?,
     };
-    println!("System parameters loaded successfully.");
 
     // --- Step 2: Load or Register User Key ---
     let user_key_data = load_or_register_user_key(&args, &client).await?;

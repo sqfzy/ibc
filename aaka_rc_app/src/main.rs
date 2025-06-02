@@ -156,7 +156,7 @@ async fn register_user(
     State(state): State<RcState>,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<UserRegistrationResponse>, AppError> {
-    println!("Registering user: {}", payload.id);
+    // println!("Registering user: {}", payload.id);
     let mut state_write = state.inner.write(); // Need mutable access for RNG
 
     let InnerRcState { msk, rng, .. } = &mut *state_write;
@@ -181,7 +181,7 @@ async fn register_server(
     State(state): State<RcState>,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<ServerRegistrationResponse>, AppError> {
-    println!("Registering server: {}", payload.id);
+    // println!("Registering server: {}", payload.id);
     let state_read = state.inner.read(); // Read lock might be enough if RNG state isn't mutated often
 
     if let Some(msk) = &state_read.msk {
