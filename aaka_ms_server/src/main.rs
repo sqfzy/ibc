@@ -140,7 +140,7 @@ async fn handle_auth_request(
     match server_result {
         Ok((response, session_key)) => {
             println!(
-                "Authentication successful. Session Key: {}",
+                "Authentication successful. Server Session Key: {}",
                 hex::encode(&session_key.0)
             );
             // 3. Serialize the response to hex JSON format

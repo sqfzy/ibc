@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow};
-use ark_serialize::CanonicalDeserialize;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::{SeedableRng, rngs::StdRng};
 use clap::Parser;
 use dotenvy::dotenv;
@@ -73,12 +73,12 @@ fn hex_to_ark<T: CanonicalDeserialize>(hex_str: &str) -> Result<T> {
 }
 
 // Helper to serialize arkworks types to hex string
-// fn ark_to_hex<T: CanonicalSerialize>(item: &T) -> Result<String> {
-//     let mut buffer = Vec::new();
-//     item.serialize_compressed(&mut buffer)
-//         .map_err(|e| anyhow!("Ark Serialization failed: {}", e))?;
-//     Ok(hex::encode(buffer))
-// }
+fn ark_to_hex<T: CanonicalSerialize>(item: &T) -> Result<String> {
+    let mut buffer = Vec::new();
+    item.serialize_compressed(&mut buffer)
+        .map_err(|e| anyhow!("Ark Serialization failed: {}", e))?;
+    Ok(hex::encode(buffer))
+}
 
 // --- Function to load or register user key ---
 async fn load_or_register_user_key(args: &Args, client: &reqwest::Client) -> Result<UserKeyData> {
@@ -212,7 +212,7 @@ async fn main() -> anyhow::Result<()> {
     // --- Step 3: Initiate Authentication (Call Core Lib) ---
     // (Logic remains the same, uses loaded usk and params)
     let mut rng = StdRng::seed_from_u64(99999u64);
-    let (_, user_state) = user::initiate_authentication(
+    let (request, user_state) = user::initiate_authentication(
         &usk,
         args.user_id.as_bytes(),
         args.server_id.as_bytes(),
@@ -229,9 +229,20 @@ async fn main() -> anyhow::Result<()> {
     // --- Step 4: Send Request to MS (Serialize to JSON with hex) ---
     // (Logic remains the same)
     #[derive(Serialize)]
-    struct AuthRequestPayloadForSend {/* ... */}
-    let request_payload = AuthRequestPayloadForSend { /* ... */ }; // Populate from request
-    // ...
+    struct AuthRequestPayloadForSend {
+        m_hex: String,
+        n: String,
+        sigma_hex: String,
+        timestamp: u64,
+    }
+
+    let request_payload = AuthRequestPayloadForSend {
+        m_hex: ark_to_hex(&request.m)?,
+        n: hex::encode(&request.n),
+        sigma_hex: ark_to_hex(&request.sigma)?,
+        timestamp: request.timestamp,
+    };
+
     let ms_auth_url = format!("http://{}/auth/initiate", args.ms_addr);
     println!("Sending request to: {}", ms_auth_url);
     let res = client
@@ -265,8 +276,8 @@ async fn main() -> anyhow::Result<()> {
             args.key_len,
         );
         match user_session_key_result {
-            Ok(_) => {
-                println!("SUCCESS: Session keys match!");
+            Ok(key) => {
+                println!("SUCCESS: Client Session key is {:?}", hex::encode(&key.0));
                 std::process::exit(0);
             }
             Err(e) => {

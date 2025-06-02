@@ -1,5 +1,3 @@
-#!/usr/bin/env fish
-
 echo "--- Starting AAKA Protocol Test ---"
 
 # Configuration (adjust paths if needed)
@@ -104,30 +102,4 @@ if not ps -p $MS_PID > /dev/null
     exit 1
 end
 
-# --- Step 5: Run User App ---
-echo "Running User App to perform authentication..."
-# Pass config via environment variables or command line args
-# Using command line args here as implemented in user app
-
-$USER_BIN --user-id "$USER_ID" --server-id "$SERVER_ID" # Add other args like --ms-addr if defaults are not used
-
-set USER_APP_STATUS $status
-
-# Unset env vars
-set -e PARAMS_P_HEX PARAMS_P_PUB_HEX PARAMS_P_PUB_HAT_HEX PARAMS_G_HEX USK_R_U_HEX USK_SID_U_HEX
-
-# --- Step 6: Cleanup and Report ---
-echo "Cleaning up background processes..."
-# Kill MS and RC servers using their PIDs
-kill $MS_PID > /dev/null 2>&1
-kill $RC_PID > /dev/null 2>&1
-# Wait a moment for processes to terminate
-sleep 1
-
-if test $USER_APP_STATUS -eq 0
-    echo "--- Test SUCCESSFUL ---"
-    exit 0
-else
-    echo "--- Test FAILED (User app exited with status $USER_APP_STATUS) ---"
-    exit 1
-end
+wait
