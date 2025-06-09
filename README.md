@@ -6,18 +6,18 @@
 
 ## 项目结构
 
-本项目是一个 Cargo workspace，包含以下成员：
+本项目包含以下成员：
 
 -   `ibc_aaka_scheme/`: 包含核心密码学协议逻辑的库。
 -   `aaka_rc_app/`: 注册中心 (RC) 的 Axum Web 服务应用。
 -   `aaka_ms_server/`: MEC 服务器 (MS) 的 Axum Web 服务应用。
--   `aaka_user_app/`: (可选) 用于测试的命令行用户模拟器。
+-   `aaka_user_app/`: 用于测试的命令行用户模拟器。
 
 ## 环境要求
 
 -   Cargo (Rust 的包管理器和构建工具)
--   `nushell`
--   `httpie`
+-   `nushell` (用于运行 Nu 脚本)
+-   `httpie` (用于测试 HTTP API)
 
 ## 设置与配置
 
@@ -28,17 +28,17 @@
     ```
 
 2. **相关配置**
-```
-./aaka_ms_server/config.json # MS 服务器配置文件
-./aaka_rc_app/config.json # RC 服务器配置文件
-./aaka_user_app/config.json # 用户应用配置文件
+    ```
+    ./aaka_ms_server/config.json # MS 服务器配置文件
+    ./aaka_rc_app/config.json # RC 服务器配置文件
+    ./aaka_user_app/config.json # 用户应用配置文件
 
-./aaka_ms_server/ms_state.json # 保存 MS 服务器状态文件，例如RC密钥
-./aaka_user_app/user_key.json # 保存用户密钥
+    ./aaka_ms_server/ms_state.json # 保存 MS 服务器状态文件，例如RC密钥
+    ./aaka_user_app/user_key.json # 保存用户密钥
 
-```
+    ```
 
 3. **测试**
-```
-nu ./run_test.nu
-```
+    ```
+    nu ./run_test.nu
+    ```
