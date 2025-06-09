@@ -4,8 +4,9 @@ use ark_std::rand::{SeedableRng, rngs::StdRng};
 use clap::Parser;
 use dotenvy::dotenv;
 use ibc_aaka_scheme::{ServerAuthResponse, SystemParameters, UserSecretKey, user};
-use serde::{Deserialize, Serialize}; // Add Serialize for saving UserKeyData
-use std::{fs, path::PathBuf}; // Add fs and PathBuf for file operations
+use serde::{Deserialize, Serialize};
+use std::{fs, path::PathBuf};
+use tracing::{error, info, warn}; // Add Serialize for saving UserKeyData // Add fs and PathBuf for file operations
 
 // --- Command Line Arguments (remain the same) ---
 #[derive(Parser, Debug)]
@@ -26,6 +27,16 @@ struct Args {
     #[arg(long, default_value_t = false)]
     force_register: bool,
     #[arg(long, default_value_t = 32)]
+    key_len: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct Config {
+    ms_id: String,
+    user_id: String,
+    rc_url: String,
+    ms_url: String,
+    key_file: PathBuf,
     key_len: usize,
 }
 
@@ -81,41 +92,51 @@ fn ark_to_hex<T: CanonicalSerialize>(item: &T) -> Result<String> {
 }
 
 // --- Function to load or register user key ---
-async fn load_or_register_user_key(args: &Args, client: &reqwest::Client) -> Result<UserKeyData> {
-    if !args.force_register && args.key_file.exists() {
-        println!("Attempting to load user key from file: {:?}", args.key_file);
-        let content = fs::read_to_string(&args.key_file)
-            .context(format!("Failed to read key file: {:?}", args.key_file))?;
+async fn load_or_register_user_key(
+    config: &Config,
+    client: &reqwest::Client,
+) -> Result<UserKeyData> {
+    // FIX: 
+    // if config.key_file.exists() {
+    if false {
+        info!(
+            "Attempting to load user key from file: {:?}",
+            config.key_file
+        );
+        let content = fs::read_to_string(&config.key_file)
+            .context(format!("Failed to read key file: {:?}", config.key_file))?;
         let stored_data: UserKeyData = serde_json::from_str(&content).context(format!(
             "Failed to parse JSON from key file: {:?}",
-            args.key_file
+            config.key_file
         ))?;
 
         // Optional: Verify if the stored ID matches the requested ID
-        if stored_data.user_id == args.user_id {
-            println!("User key loaded successfully for '{}'.", args.user_id);
+        if stored_data.user_id == config.user_id {
+            info!("User key loaded successfully for '{}'.", config.user_id);
             return Ok(stored_data);
         } else {
-            println!(
-                "Warning: Key file exists but for a different user ID ({} vs {}). Proceeding with registration.",
-                stored_data.user_id, args.user_id
+            warn!(
+                "Key file exists but for a different user ID ({} vs {}). Proceeding with registration.",
+                stored_data.user_id, config.user_id
             );
             // Fall through to registration
         }
     }
 
     // Key file doesn't exist, doesn't match, or force_register is true
-    println!(
+    info!(
         "Registering user '{}' with RC at {}...",
-        args.user_id, args.rc_url
+        config.user_id, config.rc_url
     );
-    let register_url = format!("{}/register/user", args.rc_url);
+    let register_url = format!("{}/register/user", config.rc_url);
 
     #[derive(Serialize)]
     struct RegisterPayload<'a> {
         id: &'a str,
     }
-    let payload = RegisterPayload { id: &args.user_id };
+    let payload = RegisterPayload {
+        id: &config.user_id,
+    };
 
     let resp = client
         .post(&register_url)
@@ -123,48 +144,32 @@ async fn load_or_register_user_key(args: &Args, client: &reqwest::Client) -> Res
         .send()
         .await
         .context(format!(
-            "Failed to send user registration request to RC: {}",
-            register_url
-        ))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .unwrap_or_else(|_| "Failed to read body".into());
-        return Err(anyhow!(
-            "RC returned error status {} during user registration: {}",
-            status,
-            body
-        ));
-    }
+            "Failed to send user registration request to RC: {register_url}",
+        ))?
+        .error_for_status()?;
 
     let reg_resp: RcUserRegistrationResponse = resp
         .json()
         .await
         .context("Failed to parse JSON user registration response from RC")?;
 
-    println!("User registered successfully.");
+    info!("User registered successfully.");
 
     let new_key_data = UserKeyData {
-        user_id: args.user_id.clone(),
+        user_id: config.user_id.clone(),
         key_info: reg_resp.clone(), // Clone response for saving
     };
 
     // Attempt to save the new key data
     match serde_json::to_string_pretty(&new_key_data) {
-        Ok(json_content) => match fs::write(&args.key_file, json_content) {
-            Ok(_) => println!("User key saved to file: {:?}", args.key_file),
-            Err(e) => println!(
-                "Warning: Failed to save user key to file {:?}: {}",
-                args.key_file, e
+        Ok(json_content) => match fs::write(&config.key_file, json_content) {
+            Ok(_) => info!("User key saved to file: {:?}", config.key_file),
+            Err(e) => warn!(
+                "Failed to save user key to file {:?}: {}",
+                config.key_file, e
             ),
         },
-        Err(e) => println!(
-            "Warning: Failed to serialize user key data for saving: {}",
-            e
-        ),
+        Err(e) => warn!("Failed to serialize user key data for saving: {}", e),
     }
 
     Ok(new_key_data) // Return the newly obtained key data
@@ -174,23 +179,28 @@ async fn load_or_register_user_key(args: &Args, client: &reqwest::Client) -> Res
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    dotenv().ok();
-    let args = Args::parse();
+    tracing_subscriber::fmt::init();
+
+    let config: Config = serde_json::from_str(&std::fs::read_to_string("config.json")?)
+        .context("Failed to parse configuration from file")?;
 
     // --- Initialize HTTP client ---
     let client = reqwest::Client::new();
 
     // --- Step 1: Load/Fetch System Parameters ---
-    println!("Fetching system parameters from RC at {}...", args.rc_url);
-    let params_rc_url = format!("{}/params", args.rc_url);
+    info!("Fetching system parameters from RC at {}...", config.rc_url);
+    let params_rc_url = format!("{}/params", config.rc_url);
+
     let params_resp: RcSystemParametersResponse = client
         .get(&params_rc_url)
         .send()
         .await
-        .context(format!("Failed to get params from RC: {}", params_rc_url))?
+        .context(format!("Failed to get params from RC: {params_rc_url}"))?
+        .error_for_status()?
         .json()
         .await
         .context("Failed to parse params JSON from RC")?;
+    info!("System parameters fetched successfully.");
 
     let params = SystemParameters {
         p: hex_to_ark(&params_resp.p_hex)?,
@@ -200,7 +210,11 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // --- Step 2: Load or Register User Key ---
-    let user_key_data = load_or_register_user_key(&args, &client).await?;
+    info!(
+        "Loading or registering user key for '{}' with RC at {}...",
+        config.user_id, config.rc_url
+    );
+    let user_key_data = load_or_register_user_key(&config, &client).await?;
 
     // Deserialize the loaded/fetched user key
     let usk = UserSecretKey {
@@ -210,20 +224,17 @@ async fn main() -> anyhow::Result<()> {
 
     // --- Step 3: Initiate Authentication (Call Core Lib) ---
     // (Logic remains the same, uses loaded usk and params)
-    let mut rng = StdRng::seed_from_u64(99999u64);
+    let mut rng = StdRng::from_entropy();
     let (request, user_state) = user::initiate_authentication(
         &usk,
-        args.user_id.as_bytes(),
-        args.server_id.as_bytes(),
+        config.user_id.as_bytes(),
+        config.ms_id.as_bytes(),
         &params,
         &mut rng,
     )
     .context("Failed to initiate authentication")?;
 
-    println!(
-        "Initiating authentication for user '{}' with server '{}'...",
-        args.user_id, args.server_id
-    );
+    info!("Authentication request generated successfully.");
 
     // --- Step 4: Send Request to MS (Serialize to JSON with hex) ---
     // (Logic remains the same)
@@ -242,52 +253,52 @@ async fn main() -> anyhow::Result<()> {
         timestamp: request.timestamp,
     };
 
-    let ms_auth_url = format!("http://{}/auth/initiate", args.ms_addr);
-    println!("Sending request to: {}", ms_auth_url);
+    info!("Sending authentication request to MS...");
+
+    let ms_auth_url = format!("{}/auth/initiate", config.ms_url);
     let res = client
         .post(&ms_auth_url)
         .json(&request_payload)
         .send()
-        .await?; // Simplified error handling
+        .await?
+        .error_for_status()?;
+
+    info!(
+        "Authentication request sent successfully to MS at {}",
+        ms_auth_url
+    );
 
     // --- Step 5: Process Response from MS ---
-    // (Logic remains the same)
-    if res.status().is_success() {
-        let success_resp: MsAuthSuccessResponse = res.json().await?; // Simplified
-        println!(
-            "Received successful response from MS: {}",
-            success_resp.message
-        );
+    let success_resp: MsAuthSuccessResponse = res.json().await?; // Simplified
+    info!(
+        "Received successful response from MS: {}",
+        success_resp.message
+    );
 
-        // Deserialize the inner response payload
-        let server_response_data = ServerAuthResponse {
-            t: hex_to_ark(&success_resp.response.t_hex)?,
-            y: hex_to_ark(&success_resp.response.y_hex)?,
-            timestamp: success_resp.response.timestamp,
-        };
+    // Deserialize the inner response payload
+    let server_response_data = ServerAuthResponse {
+        t: hex_to_ark(&success_resp.response.t_hex)?,
+        y: hex_to_ark(&success_resp.response.y_hex)?,
+        timestamp: success_resp.response.timestamp,
+    };
 
-        let user_session_key_result = user::process_server_response(
-            &usk,
-            &user_state,
-            &server_response_data,
-            args.server_id.as_bytes(),
-            &params,
-            args.key_len,
-        );
-        match user_session_key_result {
-            Ok(key) => {
-                println!("SUCCESS: Client Session key is {:?}", hex::encode(&key.0));
-                std::process::exit(0);
-            }
-            Err(e) => {
-                // ... (print error, exit 1) ...
-                eprintln!("ERROR: Failed to process server response: {:?}", e);
-                std::process::exit(1);
-            }
+    let user_session_key_result = user::process_server_response(
+        &usk,
+        &user_state,
+        &server_response_data,
+        config.ms_id.as_bytes(),
+        &params,
+        config.key_len,
+    );
+    match user_session_key_result {
+        Ok(key) => {
+            info!("SUCCESS: Client Session key is {:?}", hex::encode(&key.0));
+            std::process::exit(0);
         }
-    } else {
-        // ... (Handle MS error response, exit 1) ...
-        eprintln!("ERROR: MS returned error status {}", res.status());
-        std::process::exit(1);
+        Err(e) => {
+            // ... (print error, exit 1) ...
+            error!("ERROR: Failed to process server response: {:?}", e);
+            std::process::exit(1);
+        }
     }
 }

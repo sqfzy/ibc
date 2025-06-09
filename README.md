@@ -15,10 +15,9 @@
 
 ## 环境要求
 
--   Rust 工具链 (最新稳定版推荐，例如通过 `rustup` 安装)
 -   Cargo (Rust 的包管理器和构建工具)
--   `jq` (命令行 JSON 处理工具，用于测试脚本提取数据，可选但推荐)
--   `curl` (用于手动测试 API 或被测试脚本使用)
+-   `nushell`
+-   `httpie`
 
 ## 设置与配置
 
@@ -28,35 +27,18 @@
     cd <your-repo-name>
     ```
 
-2.  **创建 `.env` 文件 (可选):**
-    在项目的根目录（workspace 根目录）创建一个名为 `.env` 的文件。这个文件用于配置服务的监听地址和（对于 MS）RC 服务的地址。复制以下内容并根据需要修改：
+2. **相关配置**
+```
+./aaka_ms_server/config.json # MS 服务器配置文件
+./aaka_rc_app/config.json # RC 服务器配置文件
+./aaka_user_app/config.json # 用户应用配置文件
 
-    ```dotenv
-    # .env
+./aaka_ms_server/ms_state.json # 保存 MS 服务器状态文件，例如RC密钥
+./aaka_user_app/user_key.json # 保存用户密钥
 
-    # RC 服务监听地址和端口
-    RC_LISTEN_ADDR=0.0.0.0:3001
+```
 
-    # MS 服务监听地址和端口
-    MS_LISTEN_ADDR=0.0.0.0:3002
-
-    # MS 服务需要知道的 RC 服务 URL (用于自动获取参数)
-    MS_RC_URL=http://localhost:3001
-
-    # MS 服务器自身的身份 ID (用于向 RC 注册)
-    MS_SERVER_ID="mec-server-1.edge"
-
-    # MS 服务器的密钥和参数
-    # MS_PARAMS_P_HEX=...
-    # MS_PARAMS_P_PUB_HEX=...
-    # MS_PARAMS_P_PUB_HAT_HEX=...
-    # MS_PARAMS_G_HEX=...
-    # MS_SSK_SID_MS_HEX=...
-    ```
-
-## 构建项目
-
-在项目根目录运行以下命令来构建所有应用：
-
-```bash
-cargo build
+3. **测试**
+```
+nu ./run_test.nu
+```

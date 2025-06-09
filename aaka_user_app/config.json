@@ -1,0 +1,8 @@
+{
+  "ms_id": "my_server",
+  "user_id": "user",
+  "rc_url": "http://127.0.0.1:5000",
+  "ms_url": "http://127.0.0.1:4001",
+  "key_file": "user_key.json",
+  "key_len": 32
+}

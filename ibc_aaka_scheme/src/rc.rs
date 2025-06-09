@@ -11,7 +11,7 @@ use crate::{
     hash_utils,
 };
 use ark_ec::{Group, pairing::Pairing}; // Need CurveGroup for zero(), Group for identity
-use ark_ff::{Field, UniformRand}; // Need Field for inverse, UniformRand for random generation
+use ark_ff::{BigInt, Field, UniformRand}; // Need Field for inverse, UniformRand for random generation
 use ark_std::Zero;
 use ark_std::ops::Add;
 use ark_std::rand::prelude::*; // For random number generation (e.g., thread_rng) // Need Add trait

@@ -3,12 +3,10 @@ pub mod rc; // Make the rc module public
 pub mod server;
 pub mod user;
 
-use ark_bls12_381::{
-    Bls12_381, Fr as BlsScalarField, FrConfig, G1Affine, G1Projective, G2Projective,
-};
+use ark_bls12_381::{Bls12_381, Fr as BlsScalarField, G1Affine, G1Projective, G2Projective};
 use ark_ec::pairing::PairingOutput;
 use ark_ec::{Group, pairing::Pairing}; // Need CurveGroup for zero(), Group for identity
-use ark_ff::{BigInt, Field, FpConfig, MontBackend, UniformRand}; // Need Field for inverse, UniformRand for random generation
+use ark_ff::{BigInt, Field, UniformRand}; // Need Field for inverse, UniformRand for random generation
 use ark_std::Zero;
 use ark_std::ops::Add;
 use ark_std::rand::prelude::*; // For random number generation (e.g., thread_rng) // Need Add trait
@@ -85,10 +83,7 @@ pub struct MasterSecretKey {
 impl MasterSecretKey {
     pub fn into_shares(self, n: usize) -> Vec<Share> {
         let sharks = Sharks(n as u8);
-        let msk_bytes: [u8; 64] = bytemuck::cast([
-            FpConfig::into_bigint(self.s).0,
-            FpConfig::into_bigint(self.s_hat).0,
-        ]);
+        let msk_bytes: [u8; 64] = bytemuck::cast([self.s.0.0, self.s_hat.0.0]);
         let dealer = sharks.dealer(&msk_bytes);
         dealer.take(n).collect::<Vec<_>>()
     }
@@ -107,6 +102,18 @@ impl MasterSecretKey {
 
         Ok(Self { s, s_hat })
     }
+}
+
+#[test]
+fn test_shares() {
+    let mut rng = StdRng::from_entropy();
+    let s = ScalarField::rand(&mut rng);
+    let s_hat = ScalarField::rand(&mut rng); // Use ŝ notation internally as s_hat
+    let msk = MasterSecretKey { s, s_hat };
+
+    let shares = msk.clone().into_shares(3);
+    let msk2 = MasterSecretKey::from_shares(shares, 3).unwrap();
+    assert_eq!(msk, msk2);
 }
 
 #[derive(Debug, Clone, CanonicalSerialize, CanonicalDeserialize, PartialEq)]
@@ -416,19 +423,6 @@ mod tests {
             AAKAError::InvalidTimestamp => {} // Expected error due to old timestamp
             e => panic!("Expected InvalidTimestamp (stale), got {:?}", e),
         }
-    }
-
-    #[test]
-    fn test_shares() {
-        let mut rng = StdRng::from_entropy();
-        let s = ScalarField::rand(&mut rng);
-        let s_hat = ScalarField::rand(&mut rng); // Use ŝ notation internally as s_hat
-        let msk = MasterSecretKey { s, s_hat };
-        println!("{:?}", msk);
-
-        let shares = msk.clone().into_shares(3);
-        let msk2 = MasterSecretKey::from_shares(shares, 3).unwrap();
-        assert_eq!(msk, msk2);
     }
 
     // TODO: Add more tests:
