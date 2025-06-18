@@ -1,4 +1,7 @@
-use anyhow::{Result, anyhow};
+use aaka_rc_app::{
+    telemetry::init_subscriber,
+    util::{collect_shares, distribute_shares},
+};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::{SeedableRng, rngs::StdRng};
 use axum::{
@@ -10,26 +13,43 @@ use axum::{
 };
 use blahaj::{Share, Sharks};
 use dotenvy::dotenv;
+use eyre::{Result, anyhow, bail};
+use figment::{
+    Figment,
+    providers::{self, Format},
+};
 use ibc_aaka_scheme::{
     MasterSecretKey, // Import core types and rc functions
     SystemParameters,
     rc,
 };
+use rand::thread_rng;
 use reqwest::Client;
 // Use RwLock for interior mutability of state
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, env, str::FromStr, sync::Arc};
 use tokio::sync::RwLock;
-use tracing::{Level, debug, info, warn};
+use tower_http::trace::TraceLayer;
+use tracing::{Level, debug, info, instrument, warn};
+use tracing_error::ErrorLayer;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-// 用于从 config.json 加载配置
 #[derive(Deserialize)]
-struct Config {
-    rc_addr: String,
+struct RcConfig {
+    addr: String,
     nodes: Vec<String>,
+    threshold: usize,
 }
 
-// --- State Management ---
+impl RcConfig {
+    fn peers(&self) -> Vec<String> {
+        self.nodes
+            .iter()
+            .filter(|&node| node != &self.addr)
+            .cloned()
+            .collect()
+    }
+}
 
 // Structure to hold the RC's state (parameters and master key)
 // We wrap it in Arc<RwLock<...>> for safe concurrent access in Axum handlers
@@ -40,64 +60,21 @@ struct RcState {
 
 struct InnerRcState {
     params: Option<SystemParameters>,
-    // msk: Option<MasterSecretKey>,
-    rng: StdRng, // Keep a seeded RNG for deterministic key generation if needed in handlers
-    // 集群中所有节点（包括自己）的地址
-    peers: Arc<Vec<String>>,
-    // 自己的地址
-    self_addr: String,
-    shares: Vec<Share>,
+    share: Option<Share>,
+    config: RcConfig,
 }
 
 impl RcState {
-    fn new(self_addr: String, peers: Vec<String>) -> Result<Self> {
-        let rng = StdRng::from_entropy();
-
-        // Create the initial state with params and msk populated
+    fn new(config: RcConfig) -> Result<Self> {
         let initial_state = InnerRcState {
             params: None,
-            // msk: None,                    // Store MSK in memory (simplification!)
-            rng,                    // Move rng into state
-            shares: Vec::new(),     // Initialize empty shares vector
-            peers: Arc::new(peers), // Store peers in an Arc for shared access
-            self_addr,              // Store self address
+            share: None,
+            config,
         };
 
         Ok(Self {
             inner: Arc::new(RwLock::new(initial_state)),
         })
-    }
-}
-
-impl InnerRcState {
-    async fn recover_secret(&self) -> Result<MasterSecretKey, AppError> {
-        let nodes_count = self.peers.len();
-
-        let mut shares = self.shares.clone();
-        for peer_addr in self.peers.iter() {
-            if peer_addr == &self.self_addr {
-                // Skip self, we already have our own share
-                continue;
-            }
-
-            // Collect shares from all peers
-            let res = reqwest::get(format!("http://{peer_addr}/get_shares")).await;
-
-            match res {
-                Ok(response) => {
-                    if let Ok(shares_bytes) = response.json::<Vec<Vec<u8>>>().await {
-                        for share_bytes in shares_bytes {
-                            if let Ok(share) = Share::try_from(share_bytes.as_slice()) {
-                                shares.push(share);
-                            }
-                        }
-                    }
-                }
-                Err(e) => warn!("Failed to get shares from {}: {}", peer_addr, e),
-            }
-        }
-
-        Ok(MasterSecretKey::from_shares(shares, nodes_count)?)
     }
 }
 
@@ -166,9 +143,8 @@ async fn get_params(
         };
         Ok(Json(response))
     } else {
-        // This case should ideally not happen if RcState::new() succeeds
         Err(AppError(anyhow!(
-            "Internal error: System parameters are unexpectedly missing."
+            "RC should be initialized first by calling /setup endpoint before /get_params."
         )))
     }
 }
@@ -178,51 +154,12 @@ async fn get_params(
 async fn setup_system(
     State(state): State<RcState>,
 ) -> Result<Json<SystemParametersResponse>, AppError> {
-    debug!("Calling setup_system handler");
-
     let mut state_write = state.inner.write().await;
-    if state_write.self_addr != state_write.peers[0] {
-        // Only allow setup on the first node in the peer list
-        return Err(AppError(anyhow!(
-            "Setup can only be called on the first node in the peer list."
-        )));
-    }
+    let nodes_count = state_write.config.nodes.len();
 
-    // Perform setup immediately
-    info!("Running initial setup...");
-    // Call rc::setup directly
-    let (params, msk) = rc::setup(&mut state_write.rng)?; // Use anyhow context
-    info!("Initial setup complete.");
-
-    state_write.params = Some(params.clone()); // Store system parameters
-
-    let nodes_count = state_write.peers.len();
-
-    let shares = msk
-        .into_shares(nodes_count)
-        .into_iter()
-        .map(|s| Vec::from(&s))
-        .collect::<Vec<Vec<u8>>>();
-
-    for (i, peer) in state_write.peers.to_vec().into_iter().enumerate() {
-        if peer == state_write.self_addr {
-            state_write.shares =
-                vec![Share::try_from(shares[i].as_slice()).map_err(|e| AppError(anyhow!(e)))?]; // Store own share
-            continue; // Skip self
-        }
-
-        // Send shares to other peers
-        let res = Client::new()
-            .post(format!("http://{}/set_shares", peer))
-            .json(&vec![shares[i].clone()])
-            .send()
-            .await;
-
-        match res {
-            Ok(_) => println!("Shares sent to peer: {}", peer),
-            Err(e) => warn!("Failed to send shares to {}: {}", peer, e),
-        }
-    }
+    // 生成主密钥，但这只是临时的，节点本身不存储msk
+    let (params, msk) = rc::gen_parameter_and_msk(&mut thread_rng())?; // Use anyhow context
+    let mut shares = msk.into_shares(state_write.config.threshold, nodes_count);
 
     let response = SystemParametersResponse {
         p_hex: ark_to_hex(&params.p)?,
@@ -230,6 +167,12 @@ async fn setup_system(
         p_pub_hat_hex: ark_to_hex(&params.p_pub_hat)?,
         g_hex: ark_to_hex(&params.g)?,
     };
+
+    state_write.params = Some(params);
+    state_write.share = Some(shares.pop().unwrap()); // 为当前节点分配一个 share
+
+    distribute_shares(&shares, &state_write.config.peers()).await?;
+
     Ok(Json(response))
 }
 
@@ -238,15 +181,19 @@ async fn register_user(
     State(state): State<RcState>,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<UserRegistrationResponse>, AppError> {
-    debug!("Calling register_user handler. payload: {:?}", payload);
+    let mut state_write = state.inner.write().await;
 
-    // println!("Registering user: {}", payload.id);
-    let mut state_write = state.inner.write().await; // Need mutable access for RNG
+    let Some(share) = &state_write.share else {
+        return Err(AppError(anyhow!(
+            "RC must be initialized first by calling /setup endpoint before user registration."
+        )));
+    };
 
-    let msk = state_write.recover_secret().await?;
-    let InnerRcState { rng, .. } = &mut *state_write;
+    let shares = collect_shares(share.clone(), &state_write.config.peers()).await?;
+    let msk = MasterSecretKey::from_shares(shares, state_write.config.threshold)?;
+    let mut rng = thread_rng();
     let user_id_bytes = payload.id.as_bytes();
-    let usk = rc::register_user(&msk, user_id_bytes, rng)?;
+    let usk = rc::register_user(&msk, user_id_bytes, &mut rng)?;
 
     let response = UserRegistrationResponse {
         r_u_hex: ark_to_hex(&usk.r_u)?,
@@ -264,7 +211,14 @@ async fn register_server(
 
     let state_read = state.inner.read().await; // Read lock might be enough if RNG state isn't mutated often
 
-    let msk = state_read.recover_secret().await?;
+    let Some(share) = &state_read.share else {
+        return Err(AppError(anyhow!(
+            "RC must be initialized first by calling /setup endpoint before server registration."
+        )));
+    };
+
+    let shares = collect_shares(share.clone(), &state_read.config.peers()).await?;
+    let msk = MasterSecretKey::from_shares(shares, state_read.config.threshold)?;
     let server_id_bytes = payload.id.as_bytes();
     // **Ensure register_server uses the corrected G2 logic**
     let ssk = rc::register_server(&msk, server_id_bytes)?;
@@ -277,33 +231,33 @@ async fn register_server(
 }
 
 // Handler for POST /set_shares
-async fn set_shares(
+async fn set_share(
     State(state): State<RcState>,
-    Json(shares): Json<Vec<Vec<u8>>>,
-) -> Result<StatusCode, AppError> {
-    debug!("Calling set_shares handler. shares: {:?}", shares);
+    Json(share): Json<Vec<u8>>,
+) -> Result<(), AppError> {
+    debug!("Calling set_shares handler. share: {:?}", share);
 
     let mut state_write = state.inner.write().await;
 
-    let shares = shares
-        .into_iter()
-        .map(|s| Share::try_from(s.as_slice()).map_err(|e| AppError(anyhow!(e))))
-        .collect::<Result<Vec<Share>, AppError>>()?;
-
-    state_write.shares = shares;
-    Ok(StatusCode::OK)
+    state_write.share = Some(
+        Share::try_from(share.as_slice())
+            .map_err(|e| AppError(anyhow!("Failed to deserialize share: {}", e)))?,
+    );
+    Ok(())
 }
 
 // Handler for GET /get_shares
-async fn get_shares(State(state): State<RcState>) -> Result<Json<Vec<Vec<u8>>>, AppError> {
+async fn get_share(State(state): State<RcState>) -> Result<Json<Vec<u8>>, AppError> {
     debug!("Calling get_shares handler");
 
     let state_read = state.inner.read().await;
-    let shares = &state_read.shares;
+    let Some(share) = &state_read.share else {
+        return Err(AppError(eyre::anyhow!(
+            "No share available. Ensure /set_share was called first."
+        )));
+    };
 
-    // Convert each Share to Vec<u8>
-    let shares_bytes: Vec<Vec<u8>> = shares.iter().map(Vec::from).collect();
-    Ok(Json(shares_bytes))
+    Ok(Json(share.into()))
 }
 
 // --- Main Application Setup ---
@@ -312,27 +266,16 @@ async fn get_shares(State(state): State<RcState>) -> Result<Json<Vec<Vec<u8>>>, 
 async fn main() -> Result<()> {
     dotenv().ok();
 
-    let level = env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
-    tracing_subscriber::fmt()
-        .with_max_level(Level::from_str(&level)?)
-        .init();
+    let (sink, _guard) = tracing_appender::non_blocking(std::io::stdout());
+    init_subscriber(sink);
 
-    // 从 config.json 加载集群节点信息
-    let config_str = std::fs::read_to_string("config.json")?;
-    let config: Config = serde_json::from_str(&config_str)?;
-    let peers = config.nodes;
+    let config = Figment::new()
+        .merge(providers::Json::file("config.json"))
+        .merge(providers::Env::prefixed("RC_"))
+        .extract::<RcConfig>()?;
+    let self_addr = config.addr.clone();
 
-    let self_uri_str = env::var("RC_ADDR").unwrap_or(config.rc_addr.clone());
-
-    if !peers.contains(&self_uri_str.to_string()) {
-        warn!(
-            "Self URI '{}' is not in the config.json peer list.",
-            self_uri_str
-        );
-    }
-
-    // Initialize state
-    let rc_state = RcState::new(self_uri_str.clone(), peers)?;
+    let rc_state = RcState::new(config)?;
 
     // Build Axum app
     let app = Router::new()
@@ -340,12 +283,13 @@ async fn main() -> Result<()> {
         .route("/params", get(get_params)) // Endpoint to get public params
         .route("/register/user", post(register_user)) // Endpoint for user registration
         .route("/register/server", post(register_server)) // Endpoint for server registration
-        .route("/set_shares", post(set_shares))
-        .route("/get_shares", get(get_shares))
+        .route("/set_share", post(set_share))
+        .route("/get_share", get(get_share))
+        .layer(TraceLayer::new_for_http())
         .with_state(rc_state); // Share the state with handlers
 
     // Run the server
-    let listener = tokio::net::TcpListener::bind(&self_uri_str).await?; // Use listen_addr
+    let listener = tokio::net::TcpListener::bind(&self_addr).await?; // Use listen_addr
     println!("RC Server listening on {}", listener.local_addr()?);
     axum::serve(listener, app).await?;
 
@@ -354,7 +298,7 @@ async fn main() -> Result<()> {
 
 // --- Custom Error Type for Axum ---
 // Make Axum return proper errors using anyhow for simplicity
-struct AppError(anyhow::Error);
+struct AppError(eyre::Error);
 
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
@@ -367,10 +311,9 @@ impl IntoResponse for AppError {
     }
 }
 
-// Implement conversion from anyhow::Error to AppError
 impl<E> From<E> for AppError
 where
-    E: Into<anyhow::Error>,
+    E: Into<eyre::Error>,
 {
     fn from(err: E) -> Self {
         Self(err.into())
