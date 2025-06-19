@@ -31,7 +31,7 @@ $nodes | each { |rc_addr|
 # 发送POST请求到master_rc的/setup端点
 try {
   print $"Setting up master RC at ($master_rc)"
-  ^http get $"http://($master_rc)/setup"
+  http get $"http://($master_rc)/setup"
 } catch {
   print "Failed to setup master RC at $master_rc"
   exit 1
@@ -59,11 +59,18 @@ cd ./aaka_user_app
 
 try {
   print "Running aaka_user_app"
-  RUSTFLAGS="-A warnings" cargo run
+  RUSTFLAGS="-A warnings" cargo build
 } catch {
   print "Failed to run aaka_user_app"
   exit 1
 }
+job spawn { RUSTFLAGS="-A warnings" cargo run }
+
+sleep 1sec
+
+http post "http://127.0.0.1:4002/send_message" 'Hi bob'
+
+sleep 1sec
 
 # 4. clean up jobs
 job list | get id | each { |job_id|

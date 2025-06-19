@@ -10,12 +10,8 @@ use axum::{
 };
 use dotenvy::dotenv;
 use ibc_aaka_scheme::{
-    G1Point, // Import base crypto types
-    ScalarField,
-    ServerSecretKey, // Import core types and server functions
-    SystemParameters,
-    UserAuthRequest,
-    server,
+    G1Point, ScalarField, ServerSecretKey, SessionKey, SystemParameters, UserAuthRequest, decrypt,
+    encrypt, server,
 };
 use parking_lot::RwLock;
 use reqwest::Client;
@@ -46,6 +42,7 @@ struct InnerMsState {
     params: SystemParameters,
     ssk: ServerSecretKey, // Server's own secret key
     rng: StdRng,          // RNG for server operations (like generating y)
+    sk: Option<SessionKey>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -86,6 +83,7 @@ impl InnerMsState {
             ms_id: ms_state_temp.ms_id,
             params,
             ssk,
+            sk: None,
             rng: StdRng::from_entropy(), // Use a fixed seed for demo purposes
         })
     }
@@ -138,6 +136,12 @@ struct RcSystemParametersResponse {
     g_hex: String,
 }
 
+#[derive(Deserialize, Serialize)]
+struct Ciphertext {
+    text: Vec<u8>,
+    nonce: Vec<u8>,
+}
+
 // --- Utility Functions ---
 
 // Helper to deserialize arkworks types from hex string
@@ -173,7 +177,7 @@ async fn handle_auth_request(
     Json(payload): Json<AuthRequestPayload>,
 ) -> Result<Json<AuthSuccessResponse>, AppError> {
     println!("Received authentication request");
-    let state_locked = state.inner.read(); // Read lock should be sufficient
+    let mut state_locked = state.inner.write(); // Read lock should be sufficient
     let mut rng = state_locked.rng.clone(); // Clone RNG if needed per request, or lock state_write
 
     // 1. Deserialize request data from hex/base64
@@ -208,6 +212,7 @@ async fn handle_auth_request(
                 "Authentication successful. Server Session Key: {}",
                 hex::encode(&session_key.0)
             );
+
             // 3. Serialize the response to hex JSON format
             let response_payload = AuthResponsePayload {
                 t_hex: ark_to_hex(&response.t)?,
@@ -220,6 +225,9 @@ async fn handle_auth_request(
                 response: response_payload,
                 session_key_hex: hex::encode(&session_key.0), // DEMO ONLY
             };
+
+            state_locked.sk = Some(session_key);
+
             Ok(Json(success_response))
         }
         Err(e) => {
@@ -231,6 +239,39 @@ async fn handle_auth_request(
     }
 }
 
+async fn handle_communicate(
+    State(state): State<MsState>,
+    Json(payload): Json<Ciphertext>,
+) -> Result<Json<Ciphertext>, AppError> {
+    let state_locked = state.inner.read();
+    let Some(sk) = &state_locked.sk else {
+        return Err(AppError(anyhow!("Need auth first!")));
+    };
+
+    let mut key = [0; 32];
+    key.clone_from_slice(&sk.0[..32]);
+
+    let msg = String::from_utf8(
+        decrypt(&key, &payload.text, &payload.nonce)
+            .map_err(|e| AppError(anyhow!(e.to_string())))?,
+    )?;
+
+    println!("Received message: {msg}");
+
+    let msg = "Hi Any";
+
+    println!("Sending message: {msg}");
+
+    let (ciphertext, nonce) =
+        encrypt(&key, msg.as_bytes()).map_err(|e| AppError(anyhow!(e.to_string())))?;
+
+    let resp = Ciphertext {
+        text: ciphertext,
+        nonce,
+    };
+
+    Ok(axum::Json(resp))
+}
 // --- Main Application Setup ---
 
 #[tokio::main]
@@ -337,6 +378,7 @@ async fn main() -> Result<()> {
             params,
             ssk,
             rng: StdRng::from_entropy(),
+            sk: None,
         };
 
         // Save the state to file for future runs
@@ -354,6 +396,7 @@ async fn main() -> Result<()> {
     // --- Build Axum app ---
     let app = Router::new()
         .route("/auth/initiate", post(handle_auth_request))
+        .route("/communicate", post(handle_communicate))
         .with_state(ms_state);
 
     // --- Run the server ---
@@ -383,5 +426,32 @@ where
 {
     fn from(err: E) -> Self {
         Self(err.into())
+    }
+}
+
+#[test]
+fn foo() {
+    use anyhow::{Context, Result};
+    use tracing::{error, instrument};
+    use tracing_subscriber;
+
+    fn read_data() -> Result<()> {
+        // 模拟一个底层错误
+        let err = std::io::Error::new(std::io::ErrorKind::NotFound, "File not found on disk");
+        Err(err).context("Failed to load critical data from source")
+    }
+
+    #[instrument] // `instrument` 会创建一个 span
+    fn process_request() -> Result<()> {
+        read_data().context("Could not process user request")
+    }
+
+    fn main() {
+        tracing_subscriber::fmt::init(); // 初始化一个简单的格式化 subscriber
+
+        if let Err(err) = process_request() {
+            // 使用 `%err` 而不是 `?err` 或 `err`
+            error!(error = %err, "A top-level operation failed");
+        }
     }
 }

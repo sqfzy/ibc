@@ -1,11 +1,25 @@
 use anyhow::{Context, Result, anyhow};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::{SeedableRng, rngs::StdRng};
+use axum::{
+    Json, Router,
+    extract::State,
+    response::IntoResponse,
+    routing::{get, post},
+};
 use clap::Parser;
 use dotenvy::dotenv;
-use ibc_aaka_scheme::{ServerAuthResponse, SystemParameters, UserSecretKey, user};
+use ibc_aaka_scheme::{
+    ServerAuthResponse, SessionKey, SystemParameters, UserSecretKey, decrypt, encrypt, user,
+};
+use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
+use tokio::sync::RwLock;
 use tracing::{error, info, warn}; // Add Serialize for saving UserKeyData // Add fs and PathBuf for file operations
 
 // --- Command Line Arguments (remain the same) ---
@@ -32,6 +46,7 @@ struct Args {
 
 #[derive(Debug, Deserialize)]
 struct Config {
+    user_addr: String,
     ms_id: String,
     user_id: String,
     rc_url: String,
@@ -96,7 +111,7 @@ async fn load_or_register_user_key(
     config: &Config,
     client: &reqwest::Client,
 ) -> Result<UserKeyData> {
-    // FIX: 
+    // FIX:
     // if config.key_file.exists() {
     if false {
         info!(
@@ -290,15 +305,108 @@ async fn main() -> anyhow::Result<()> {
         &params,
         config.key_len,
     );
-    match user_session_key_result {
+    let sk = match user_session_key_result {
         Ok(key) => {
             info!("SUCCESS: Client Session key is {:?}", hex::encode(&key.0));
-            std::process::exit(0);
+            key
         }
         Err(e) => {
             // ... (print error, exit 1) ...
             error!("ERROR: Failed to process server response: {:?}", e);
             std::process::exit(1);
         }
+    };
+
+    let user_addr = config.user_addr.clone();
+    let user_state = UserState {
+        inner: Arc::new(RwLock::new(InnerUserState { params, config, sk })),
+    };
+    let app = Router::new()
+        .route("/send_message", post(handle_send_message))
+        .with_state(user_state);
+
+    let listener = tokio::net::TcpListener::bind(&user_addr).await?;
+    println!("User Server listening on {}", listener.local_addr()?);
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}
+
+#[derive(Clone)]
+struct UserState {
+    inner: Arc<RwLock<InnerUserState>>,
+}
+
+#[derive(Debug)]
+struct InnerUserState {
+    params: SystemParameters,
+    config: Config,
+    sk: SessionKey,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Msg {
+    msg: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Ciphertext {
+    text: Vec<u8>,
+    nonce: Vec<u8>,
+}
+
+async fn handle_send_message(
+    State(state): State<UserState>,
+    msg: String,
+) -> Result<Json<Msg>, AppError> {
+    let state_locked = state.inner.read().await;
+    let mut key = [0; 32];
+    key.clone_from_slice(&state_locked.sk.0[..32]);
+    let (ciphertext, nonce) =
+        encrypt(&key, msg.as_bytes()).map_err(|e| AppError(anyhow!(e.to_string())))?;
+
+    let payload = Ciphertext {
+        text: ciphertext,
+        nonce,
+    };
+
+    let ms_url = &state_locked.config.ms_url;
+
+    let client = Client::new();
+    let resp = client
+        .post(format!("{}/communicate", ms_url))
+        .json(&payload)
+        .send()
+        .await?;
+
+    let cipheresp: Ciphertext = resp.json().await?;
+
+    let msg = String::from_utf8(
+        decrypt(&key, &cipheresp.text, &cipheresp.nonce)
+            .map_err(|e| AppError(anyhow!(e.to_string())))?,
+    )?;
+
+    Ok(axum::Json(Msg { msg }))
+}
+
+struct AppError(anyhow::Error);
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> axum::response::Response {
+        eprintln!("Error occurred: {:?}", self.0);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR, // Or map specific errors (e.g., Bad Request for deserialization)
+            format!("Error: {}", self.0),
+        )
+            .into_response()
+    }
+}
+
+impl<E> From<E> for AppError
+where
+    E: Into<anyhow::Error>,
+{
+    fn from(err: E) -> Self {
+        Self(err.into())
     }
 }

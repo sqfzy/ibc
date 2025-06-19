@@ -19,7 +19,7 @@ use ark_std::rand::prelude::*; // For random number generation (e.g., thread_rng
 // --- RC Logic Implementation ---
 
 /// Generates system parameters and master secret key.
-pub fn setup<R: Rng + CryptoRng>(
+pub fn gen_parameter_and_msk<R: Rng + CryptoRng>(
     rng: &mut R,
 ) -> Result<(SystemParameters, MasterSecretKey), AAKAError> {
     // 1. Generate Master Secret Keys s, ŝ

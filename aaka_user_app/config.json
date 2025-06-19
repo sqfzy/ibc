@@ -1,4 +1,5 @@
 {
+  "user_addr": "127.0.0.1:4002",
   "ms_id": "my_server",
   "user_id": "user",
   "rc_url": "http://127.0.0.1:5000",
